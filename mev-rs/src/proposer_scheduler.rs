@@ -3,7 +3,7 @@ use beacon_api_client::{Error as ApiError, ProposerDuty};
 use ethereum_consensus::primitives::{Epoch, Slot};
 use parking_lot::Mutex;
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 #[cfg(not(feature = "minimal-preset"))]
 use beacon_api_client::mainnet::Client;
@@ -44,7 +44,7 @@ impl ProposerScheduler {
             let slot = epoch * self.slots_per_epoch;
             let state = self.state.lock();
             if state.proposer_schedule.iter().any(|schedule| schedule.slot >= slot) {
-                return Ok(())
+                return Ok(());
             }
         }
         // TODO be tolerant to re-orgs
@@ -70,6 +70,7 @@ impl ProposerScheduler {
         epoch: Epoch,
         validator_registry: &ValidatorRegistry,
     ) -> Result<(), Error> {
+        info!("on epoch {epoch}");
         let extension = self
             .fetch_new_duties(epoch)
             .await

@@ -33,6 +33,6 @@ rayon = { workspace = true }
 
 ethereum-consensus = { workspace = true }
 beacon-api-client = { workspace = true, optional = true }
-
+alloy = { version = "0.1", features = ["full", "rpc-types-beacon"] }
 [dev-dependencies]
 rand = "0.8.5"

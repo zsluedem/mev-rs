@@ -11,6 +11,7 @@ use ethereum_consensus::{
 };
 use mev_rs::{
     blinded_block_relayer::{BlockSubmissionFilter, DeliveredPayloadFilter},
+    preconf_provider::{PreconfProvider, PreconfRequest},
     signing::{compute_consensus_domain, verify_signed_builder_data, verify_signed_data},
     types::{
         block_submission::data_api::{PayloadTrace, SubmissionTrace},
@@ -245,6 +246,9 @@ struct State {
     // the current best bid is stored in `auctions`.
     other_submissions: HashMap<AuctionRequest, HashSet<AuctionContext>>,
     delivered_payloads: HashMap<AuctionRequest, Arc<AuctionContext>>,
+
+    // preconf request list
+    preconf_list: HashMap<Slot, Vec<PreconfRequest>>,
 }
 
 impl Relay {
@@ -282,8 +286,8 @@ impl Relay {
         }
         self.refresh_proposer_schedule(epoch).await;
 
-        let retain_slot = epoch.checked_sub(HISTORY_LOOK_BEHIND_EPOCHS).unwrap_or_default() *
-            self.context.slots_per_epoch;
+        let retain_slot = epoch.checked_sub(HISTORY_LOOK_BEHIND_EPOCHS).unwrap_or_default()
+            * self.context.slots_per_epoch;
         trace!(retain_slot, "pruning stale auctions");
         let mut state = self.state.lock();
         state.auctions.retain(|auction_request, _| auction_request.slot >= retain_slot);
@@ -393,7 +397,7 @@ impl Relay {
             return Err(RelayError::InvalidFeeRecipient(
                 proposer_public_key.clone(),
                 fee_recipient.clone(),
-            ))
+            ));
         }
 
         // NOTE: disabled in the "trusted" validation
@@ -410,25 +414,28 @@ impl Relay {
             return Err(RelayError::InvalidGasLimit(
                 bid_trace.gas_limit,
                 execution_payload.gas_limit(),
-            ))
+            ));
         }
 
         if bid_trace.gas_used != execution_payload.gas_used() {
-            return Err(RelayError::InvalidGasUsed(bid_trace.gas_used, execution_payload.gas_used()))
+            return Err(RelayError::InvalidGasUsed(
+                bid_trace.gas_used,
+                execution_payload.gas_used(),
+            ));
         }
 
         if &bid_trace.parent_hash != execution_payload.parent_hash() {
             return Err(RelayError::InvalidParentHash(
                 bid_trace.parent_hash.clone(),
                 execution_payload.parent_hash().clone(),
-            ))
+            ));
         }
 
         if &bid_trace.block_hash != execution_payload.block_hash() {
             return Err(RelayError::InvalidBlockHash(
                 bid_trace.block_hash.clone(),
                 execution_payload.block_hash().clone(),
-            ))
+            ));
         }
 
         Ok(())
@@ -444,7 +451,7 @@ impl Relay {
         if let Some(bid) = self.get_auction_context(&auction_request) {
             if bid.value() > value {
                 info!(%auction_request, builder_public_key = %bid.builder_public_key(), "block submission was not greater in value; ignoring");
-                return Ok(())
+                return Ok(());
             }
         }
         let auction_context = AuctionContext::new(
@@ -488,7 +495,7 @@ impl Relay {
                     ?existing,
                     "skipping attempt to store different result for delivered payload"
                 );
-                return
+                return;
             }
         }
         state.delivered_payloads.insert(auction_request, auction_context);
@@ -531,7 +538,7 @@ impl BlindedBlockProvider for Relay {
     ) -> Result<SignedBuilderBid, Error> {
         if let Err(err) = self.validate_auction_request(auction_request) {
             warn!(%err, "could not fetch best bid");
-            return Err(err.into())
+            return Err(err.into());
         }
 
         let auction_context = self
@@ -562,7 +569,7 @@ impl BlindedBlockProvider for Relay {
 
         if let Err(err) = self.validate_auction_request(&auction_request) {
             warn!(%err, "could not open bid");
-            return Err(err.into())
+            return Err(err.into());
         }
 
         let auction_context = self
@@ -576,7 +583,7 @@ impl BlindedBlockProvider for Relay {
             let local_header = auction_context.signed_builder_bid().message.header();
             if let Err(err) = validate_header_equality(local_header, execution_payload_header) {
                 warn!(%err, %auction_request, "invalid incoming signed blinded beacon block");
-                return Err(RelayError::InvalidSignedBlindedBeaconBlock.into())
+                return Err(RelayError::InvalidSignedBlindedBeaconBlock.into());
             }
         }
 
@@ -587,7 +594,7 @@ impl BlindedBlockProvider for Relay {
             &self.context,
         ) {
             warn!(%err, %auction_request, "invalid incoming signed blinded beacon block signature");
-            return Err(RelayError::InvalidSignedBlindedBeaconBlock.into())
+            return Err(RelayError::InvalidSignedBlindedBeaconBlock.into());
         }
 
         match unblind_block(signed_block, auction_context.execution_payload()) {
@@ -621,7 +628,7 @@ impl BlindedBlockProvider for Relay {
             }
             Err(err) => {
                 warn!(%err, %auction_request, "invalid incoming signed blinded beacon block");
-                return Err(RelayError::InvalidSignedBlindedBeaconBlock.into())
+                return Err(RelayError::InvalidSignedBlindedBeaconBlock.into());
             }
         }
     }
@@ -650,7 +657,7 @@ impl BlindedBlockRelayer for Relay {
             };
             if let Err(err) = self.validate_auction_request(&auction_request) {
                 warn!(%err, "could not validate bid submission");
-                return Err(err.into())
+                return Err(err.into());
             }
 
             self.validate_builder_submission_trusted(bid_trace, signed_submission.payload())?;
@@ -718,6 +725,24 @@ fn submission_trace_from_auction(auction_context: &AuctionContext) -> Submission
             .unwrap_or_default(),
         timestamp: receive_duration.as_secs(),
         timestamp_ms: receive_duration.as_millis(),
+    }
+}
+
+#[async_trait]
+impl PreconfProvider for Relay {
+    async fn get_preconf_requests(&self, slot: Slot) -> Vec<PreconfRequest> {
+        let state = self.state.lock();
+        let preconf_requests = state.preconf_list.get(&slot).unwrap_or(&vec![]).clone();
+        info!("Get preconf requests, {slot:?}");
+        preconf_requests
+    }
+    async fn publish_preconf_request(&self, preconf_request: PreconfRequest) -> Result<(), String> {
+        let mut state = self.state.lock();
+        let slot = preconf_request.preconf_conditions.slot;
+        info!("Received a preconf request, {:?}", slot);
+        let preconf_list = state.preconf_list.entry(slot).or_insert(vec![]);
+        preconf_list.push(preconf_request);
+        Ok(())
     }
 }
 

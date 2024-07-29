@@ -4,6 +4,7 @@ pub mod block_validation;
 pub mod config;
 mod error;
 mod genesis;
+pub mod preconf_provider;
 mod proposer_scheduler;
 pub mod relay;
 #[cfg(feature = "serde")]

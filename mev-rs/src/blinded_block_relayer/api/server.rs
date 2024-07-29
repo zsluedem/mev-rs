@@ -10,18 +10,20 @@ use crate::{
         DeliveredPayloadFilter, ValidatorRegistrationQuery,
     },
     error::Error,
+    preconf_provider::{PreconfProvider, PreconfRequest, PreconfRequestQuery},
     types::{
         block_submission::data_api::{PayloadTrace, SubmissionTrace},
         ProposerSchedule, SignedBidSubmission, SignedValidatorRegistration,
     },
 };
 use axum::{
-    extract::{Json, Query, State},
+    extract::{Json, Path, Query, State},
     response::Html,
     routing::{get, post, IntoMakeService},
     Router,
 };
-use hyper::server::conn::AddrIncoming;
+use beacon_api_client::ApiError;
+use hyper::{server::conn::AddrIncoming, StatusCode};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::task::JoinHandle;
 use tracing::{error, info, trace};
@@ -141,6 +143,28 @@ async fn handle_get_validator_registration<R: BlindedBlockDataProvider>(
     Ok(Json(relay.fetch_validator_registration(&params.public_key).await?))
 }
 
+async fn handle_get_preconf_requests<R: PreconfProvider>(
+    State(relay): State<R>,
+    Path(params): Path<PreconfRequestQuery>,
+) -> Result<Json<Vec<PreconfRequest>>, Error> {
+    trace!("handling get preconf requests");
+    Ok(Json(relay.get_preconf_requests(params.slot).await))
+}
+
+async fn submit_preconf_request<R: PreconfProvider>(
+    State(relay): State<R>,
+    Json(request): Json<PreconfRequest>,
+) -> Result<(), Error> {
+    trace!("handling submit preconf request");
+    relay.publish_preconf_request(request).await.map_err(|e| {
+        Error::Api(beacon_api_client::Error::Api(ApiError::ErrorMessage {
+            code: StatusCode::BAD_REQUEST,
+            message: e,
+        }))
+    })?;
+    Ok(())
+}
+
 pub struct Server<R> {
     host: Ipv4Addr,
     port: u16,
@@ -151,6 +175,7 @@ impl<
         R: BlindedBlockRelayer
             + BlindedBlockProvider
             + BlindedBlockDataProvider
+            + PreconfProvider
             + Clone
             + Send
             + Sync
@@ -185,6 +210,11 @@ impl<
             .route(
                 "/relay/v1/data/validator_registration",
                 get(handle_get_validator_registration::<R>),
+            )
+            .route("/relay/v1/preconf/preconf_request", post(submit_preconf_request::<R>))
+            .route(
+                "/relay/v1/data/preconf/preconf_request/:slot",
+                get(handle_get_preconf_requests::<R>),
             )
             .with_state(self.relay.clone());
         let addr = SocketAddr::from((self.host, self.port));
